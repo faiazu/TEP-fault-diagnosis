@@ -1,0 +1,14 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# data (never commit datasets)
+data/raw/
+data/processed/
+
+# mac
+.DS_Store
+
+# experiment outputs
+experiments/runs/*/
