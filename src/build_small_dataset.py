@@ -88,6 +88,64 @@ def load_one_run(csv_path, fault_number, run_id, chunk_size=500000):
     return df
 
 
+def load_many_runs_from_csv_once(csv_path, fault_numbers_to_use, simulation_runs_to_use, chunk_size=500000):
+    """
+    Read a CSV only ONCE and collect all requested runs.
+
+    Returns:
+        run_dataframes_by_key:
+            dictionary where key is (faultNumber, simulationRun)
+            and value is that run's DataFrame sorted by sample.
+    """
+    # check if files exist
+    if not os.path.exists(csv_path):
+        raise FileNotFoundError("File not found: " + csv_path)
+
+    # sets make "is this value requested?" checks very fast
+    requested_fault_numbers = set(int(fault_number) for fault_number in fault_numbers_to_use)
+    requested_simulation_runs = set(int(run_id) for run_id in simulation_runs_to_use)
+
+    # store rows by (faultNumber, simulationRun)
+    # each key maps to a list of small DataFrame pieces from each chunk
+    rows_by_fault_and_run = {}
+    reader = pd.read_csv(
+        csv_path,
+        usecols=TEP_COLS,
+        chunksize=chunk_size
+    )
+
+    # read file chunk by chunk (streaming, memory-safe)
+    for chunk in reader:
+        # keep only rows whose fault + run are in what we asked for
+        rows_to_keep_mask = (
+            chunk[FAULT_COL].isin(requested_fault_numbers)
+            & chunk[RUN_COL].isin(requested_simulation_runs)
+        )
+        matching_rows = chunk.loc[rows_to_keep_mask]
+
+        if len(matching_rows) == 0:
+            continue
+
+        # split that chunk into groups by (faultNumber, simulationRun)
+        grouped_matching_rows = matching_rows.groupby([FAULT_COL, RUN_COL], sort=False)
+        for (fault_number, run_id), group_rows_df in grouped_matching_rows:
+            fault_run_key = (int(fault_number), int(run_id))
+
+            if fault_run_key not in rows_by_fault_and_run:
+                rows_by_fault_and_run[fault_run_key] = []
+
+            rows_by_fault_and_run[fault_run_key].append(group_rows_df)
+
+    # combine chunk pieces for each (fault, run) into one full DataFrame
+    run_dataframes_by_key = {}
+    for fault_run_key, run_piece_list in rows_by_fault_and_run.items():
+        one_run_df = pd.concat(run_piece_list, ignore_index=True)
+        one_run_df = one_run_df.sort_values(SAMPLE_COL).reset_index(drop=True)
+        run_dataframes_by_key[fault_run_key] = one_run_df
+
+    return run_dataframes_by_key
+
+
 # turn df generated from one run into training examples
 # each run_df is of the same fault_number
 def make_windows(run_df, faultNum, runNum, window_size, step_size):
@@ -108,7 +166,7 @@ def make_windows(run_df, faultNum, runNum, window_size, step_size):
     windows = [] # list of windows
     faults = [] # the fault number (answer) corresponding to that window training data
 
-    print(f"For faultNumber {faultNum}, simulationRun {runNum}, Length of run_df is {len(run_df)}")
+    # print(f"For faultNumber {faultNum}, simulationRun {runNum}, Length of run_df is {len(run_df)}")
 
     samples_count = len(run_df) # should be 500 samples per run
     start_of_window = 0
@@ -139,8 +197,8 @@ def convert_windows_to_vectors(windows):
 
 def main():
     # data used will be from small set of specific faultNumbers and simulationRuns
-    faults_to_use = list(range(0, 6)) #0..5, out of total 0-20 faults
-    runs_to_use = list(range(1, 21)) # 1..20, total there are 500 runs per fault in training
+    faults_to_use = list(range(0, 21)) #0..5, out of total 0-20 faults
+    runs_to_use = list(range(1, 501)) # 1..20, total there are 500 runs per fault in training
 
     # Window settings
     window_size = 60
@@ -191,27 +249,48 @@ def main():
     all_answers = []         # list of answers / fault numbers (0..20)
     all_run_ids = []        # list of simulationRun IDs (same length as all_answers)  
 
-    # loop through the faults
+    # Read each CSV once and cache all requested runs.
+    # keys look like: (faultNumber, simulationRun)
+    cached_run_dataframes = {}
+
+    # in TEP files:
+    # fault 0 rows live in fault-free file
+    # faults 1..20 live in faulty file
+    fault_numbers_from_faultfree_csv = [fault_number for fault_number in faults_to_use if fault_number == 0]
+    fault_numbers_from_faulty_csv = [fault_number for fault_number in faults_to_use if fault_number != 0]
+
+    if len(fault_numbers_from_faultfree_csv) > 0:
+        print("\nScanning fault-free CSV once...")
+        loaded_faultfree_runs = load_many_runs_from_csv_once(
+            csv_path=faultfree_training_csv_path,
+            fault_numbers_to_use=fault_numbers_from_faultfree_csv,
+            simulation_runs_to_use=runs_to_use
+        )
+        cached_run_dataframes.update(loaded_faultfree_runs)
+
+    if len(fault_numbers_from_faulty_csv) > 0:
+        print("\nScanning faulty CSV once...")
+        loaded_faulty_runs = load_many_runs_from_csv_once(
+            csv_path=faulty_training_csv_path,
+            fault_numbers_to_use=fault_numbers_from_faulty_csv,
+            simulation_runs_to_use=runs_to_use
+        )
+        cached_run_dataframes.update(loaded_faulty_runs)
+
+    # Build windows in same order as before:
+    # loop faults first, then runs.
     for fault in faults_to_use:
-        # choose csv path, fault free or faulty 
-        if fault == 0:
-            csv_path = faultfree_training_csv_path
-        else:
-            csv_path = faulty_training_csv_path
-
-        # loop through the runs
+        print("Loading faultNumber", fault)
         for simRun in runs_to_use:
-            print("\nLoading run...")
-            print(f"faultNumber = {fault}, simulationRun = {simRun}")
+            # print("Loading run...")
+            #print(f"faultNumber = {fault}, simulationRun = {simRun}")
 
-            # load the simulationRun with that faultNumber
-            run_df = load_one_run(
-                csv_path=csv_path,
-                fault_number=fault,
-                run_id=simRun
-            )
+            fault_run_key = (fault, simRun)
+            if fault_run_key not in cached_run_dataframes:
+                raise ValueError(f"Missing run in loaded data for faultNumber = {fault}, simulationRun = {simRun}")
 
-            
+            run_df = cached_run_dataframes[fault_run_key]
+
             windows, faults = make_windows(
                 run_df=run_df,
                 faultNum=fault,
@@ -230,8 +309,6 @@ def main():
             all_inputs.extend(inputs)
             all_answers.extend(answers)
             all_run_ids.extend(run_ids)
-
-        continue
 
     # now we have all the jits
     # convert to numpy arrays
@@ -286,4 +363,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
