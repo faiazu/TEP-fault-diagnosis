@@ -4,10 +4,15 @@ import time
 import numpy as np
 import torch
 from torch.utils.data import TensorDataset, DataLoader
+
+from models.simplemlp import SimpleMLP
 import torch.nn as nn
 
+
+DATA_FILE_NAME = "small_fault0_20_runs1_500_W60_step10.npz"
+
 def absolute_path_of_npz_data():
-    file_name = "small_fault0_5_runs1_20_W60_step10.npz"
+    file_name = DATA_FILE_NAME
 
     # finding npz data file
     current_file_path = Path(__file__).resolve()
@@ -56,9 +61,12 @@ def split_by_runs(inputs, answers, run_ids, validation_runs):
 
     return training_set, validation_set
 
-def normalize_train_and_val(all_inputs, training_inputs, validation_inputs):
-    mean = np.mean(all_inputs, axis=0)
-    std = np.std(all_inputs, axis=0)
+def normalize_train_and_val(training_inputs, validation_inputs):
+    # IMPORTANT:
+    # compute normalization stats from TRAIN only
+    # so validation remains truly unseen during preprocessing
+    mean = np.mean(training_inputs, axis=0)
+    std = np.std(training_inputs, axis=0)
 
     # avoid dividing by zero
     std = std + 1e-8
@@ -66,7 +74,7 @@ def normalize_train_and_val(all_inputs, training_inputs, validation_inputs):
     train_inputs = (training_inputs - mean) / std
     validate_inputs = (validation_inputs - mean) / std
 
-    return train_inputs, validate_inputs
+    return train_inputs, validate_inputs, mean, std
 
 def make_loaders(training_inputs, training_answers, validation_inputs, validation_answers, batch_size):
     train_in = torch.tensor(training_inputs, dtype=torch.float32)
@@ -202,33 +210,6 @@ def validate_one_epoch(model, val_loader, loss_fn, device):
 
 
 
-
-
-# simple feed forward neural network
-# for learning loop
-# layer 1, 3120 numer vector -> 256 num vector
-# ReLu activation function, faster than sigmoid
-# layer 2, 256 num vector -> 128 num vector
-# layer 3, 128 num vector -> # answers long vector
-class SimpleMLP(nn.Module):
-    def __init__(self, input_dim, num_classes):
-        super().__init__()
-        self.fc1 = nn.Linear(input_dim, 256)
-        self.relu1 = nn.ReLU()
-        self.fc2 = nn.Linear(256, 128)
-        self.relu2 = nn.ReLU()
-        self.fc3 = nn.Linear(128, num_classes)
-
-    def forward(self, x):
-        x = self.fc1(x)
-        x = self.relu1(x)
-        x = self.fc2(x)
-        x = self.relu2(x)
-        x = self.fc3(x)
-        return x
-
-
-
 def main():
     # load dataset
     file_path = absolute_path_of_npz_data()
@@ -237,6 +218,8 @@ def main():
     inputs = data["inputs"]
     answers = data["answers"]
     run_ids = data["run_ids"]
+    window_size = int(data["window_size"]) if "window_size" in data else 60
+    step_size = int(data["step_size"]) if "step_size" in data else 10
 
     data.close()
 
@@ -248,7 +231,7 @@ def main():
     # split by simulationRun
     # the validation set exists so that we can test on that instead of actual testing data
     # because actual testing data is reserved for final score of model
-    validation_runs = [16, 17, 18, 19, 20]
+    validation_runs = list(range(376, 501)) # 16-20
     training_set, validation_set = split_by_runs(inputs, answers, run_ids, validation_runs)
 
     inputs_training_np = training_set[0]
@@ -259,10 +242,8 @@ def main():
     print("training set shape --- inputs:", inputs_training_np.shape, "answers:", answers_training_np.shape)
     print("validation set shape --- inputs:", inputs_validation_np.shape, "answers:", answers_validation_np.shape)
 
-    # normalize all inputs
-    # for both training set and validation set
-    inputs_training_np, inputs_validation_np = normalize_train_and_val(
-        all_inputs=inputs,
+    # normalize inputs using TRAIN stats only
+    inputs_training_np, inputs_validation_np, normalization_mean, normalization_std = normalize_train_and_val(
         training_inputs=inputs_training_np,
         validation_inputs=inputs_validation_np
     )
@@ -287,8 +268,10 @@ def main():
     device = pick_device()
     print("Using device:", device)
 
-    num_classes = len(np.unique(answers))
-    model = SimpleMLP(input_dim=3120, num_classes=num_classes)
+    class_labels = np.unique(answers).astype(np.int64)
+    num_classes = len(class_labels)
+    input_dim = int(inputs.shape[1])
+    model = SimpleMLP(input_dim=input_dim, num_classes=num_classes)
     model = model.to(device)
 
     loss_function = nn.CrossEntropyLoss()
@@ -316,12 +299,33 @@ def main():
     seconds = int(elapsed % 60)
     print("Training / Validation Loop --- Time elapsed:", minutes, "min", seconds, "sec")
 
+    # save trained model checkpoint
+    # checkpoint contract:
+    # - model weights
+    # - model dimensions
+    # - class label order
+    # - normalization values used during training
+    # - validation split and data metadata
+    save_path = "baseline_mlp.pt"
+    checkpoint = {
+        "model_state_dict": model.state_dict(),
+        "input_dim": input_dim,
+        "num_classes": num_classes,
+        "class_labels": class_labels,
+        "normalization_mean": normalization_mean.astype(np.float32),
+        "normalization_std": normalization_std.astype(np.float32),
+        "validation_runs": np.array(validation_runs, dtype=np.int16),
+        "data_file_name": DATA_FILE_NAME,
+        "window_size": window_size,
+        "step_size": step_size,
+        "epochs": epochs,
+    }
+    torch.save(checkpoint, save_path)
+
+    print("Saved trained model to:", save_path)
+
+
     
-
-
-
-
 
 if __name__ == "__main__":
     main()
-
