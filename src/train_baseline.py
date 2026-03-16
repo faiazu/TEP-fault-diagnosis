@@ -307,14 +307,16 @@ def main():
     # - normalization values used during training
     # - validation split and data metadata
     save_path = "baseline_mlp.pt"
+    # Save metadata as tensors / plain Python values
+    # so checkpoints are friendly with torch.load(weights_only=True).
     checkpoint = {
         "model_state_dict": model.state_dict(),
         "input_dim": input_dim,
         "num_classes": num_classes,
-        "class_labels": class_labels,
-        "normalization_mean": normalization_mean.astype(np.float32),
-        "normalization_std": normalization_std.astype(np.float32),
-        "validation_runs": np.array(validation_runs, dtype=np.int16),
+        "class_labels": torch.tensor(class_labels.tolist(), dtype=torch.long),
+        "normalization_mean": torch.tensor(normalization_mean, dtype=torch.float32),
+        "normalization_std": torch.tensor(normalization_std, dtype=torch.float32),
+        "validation_runs": torch.tensor(validation_runs, dtype=torch.int32),
         "data_file_name": DATA_FILE_NAME,
         "window_size": window_size,
         "step_size": step_size,
