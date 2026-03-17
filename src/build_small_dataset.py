@@ -13,6 +13,12 @@ FAULT_COL = "faultNumber" # what to predict
 RUN_COL = "simulationRun" # which simulation run
 SAMPLE_COL = "sample" # the time step / sample within the run
 
+# Fault timing in TEP:
+# - faulty training runs are normal through sample 20
+# - faulty testing runs are normal through sample 160
+FAULT_START_SAMPLE_TRAINING = 20
+FAULT_START_SAMPLE_TESTING = 160
+
 # Sensor columns below
 # sensors xmeas_1 to xmeas_41
 XMEAS_COLS = []
@@ -148,7 +154,7 @@ def load_many_runs_from_csv_once(csv_path, fault_numbers_to_use, simulation_runs
 
 # turn df generated from one run into training examples
 # each run_df is of the same fault_number
-def make_windows(run_df, faultNum, runNum, window_size, step_size):
+def make_windows(run_df, faultNum, runNum, window_size, step_size, fault_start_sample_threshold=None):
     """
     Split ONE run (run_df) into many overlapping windows.
 
@@ -160,7 +166,7 @@ def make_windows(run_df, faultNum, runNum, window_size, step_size):
       windows: list of windows
         each window = list of rows
         each row = list of sensor values
-      fault_nums: list of ints (one fault per window)
+      fault_nums: list of ints (one label per window)
     """
 
     windows = [] # list of windows
@@ -178,8 +184,19 @@ def make_windows(run_df, faultNum, runNum, window_size, step_size):
         window_as_list = window_sensor_df.values.tolist()
         window = window_as_list
 
+        # Use the sample value at the end of the window to decide
+        # whether this window is still pre-fault normal data.
+        window_end_sample = int(window_df.iloc[-1][SAMPLE_COL])
+
+        # Fault-free runs always stay label 0.
+        # Faulty runs should be labeled 0 until the fault has actually started.
+        if faultNum != 0 and fault_start_sample_threshold is not None and window_end_sample <= fault_start_sample_threshold:
+            window_label = 0
+        else:
+            window_label = faultNum
+
         windows.append(window)
-        faults.append(faultNum)
+        faults.append(window_label)
 
         start_of_window += step_size
 
@@ -291,12 +308,19 @@ def main():
 
             run_df = cached_run_dataframes[fault_run_key]
 
+            if fault == 0:
+                fault_start_sample_threshold = None
+            else:
+                # This script builds training data, so use the training threshold.
+                fault_start_sample_threshold = FAULT_START_SAMPLE_TRAINING
+
             windows, faults = make_windows(
                 run_df=run_df,
                 faultNum=fault,
                 runNum=simRun,
                 window_size=window_size,
-                step_size=step_size
+                step_size=step_size,
+                fault_start_sample_threshold=fault_start_sample_threshold
             )
 
             # currently this gives windows
