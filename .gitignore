@@ -12,3 +12,5 @@ data/processed/
 
 # experiment outputs
 experiments/runs/*/
+
+.vscode/

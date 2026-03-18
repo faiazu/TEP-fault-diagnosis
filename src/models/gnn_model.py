@@ -173,7 +173,7 @@ def build_spatiotemporal_edge_index(window_size, num_sensors):
     process_sensor_edges = build_process_sensor_edges()
     edge_pairs = []
 
-    # Temporal edges: same sensor, forward in time only.
+    # Temporal edges: same sensor, forward in time only
     time_step = 0
     while time_step < window_size - 1:
         sensor_index = 0
@@ -185,7 +185,7 @@ def build_spatiotemporal_edge_index(window_size, num_sensors):
 
         time_step += 1
 
-    # Process edges: same time step, undirected.
+    # Process edges: same time step, undirected
     time_step = 0
     while time_step < window_size:
         process_edge_index = 0
