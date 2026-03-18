@@ -8,7 +8,18 @@ import pandas as pd
 import torch
 from torch.utils.data import TensorDataset, DataLoader
 from models.cnn1d import SimpleCNN1D
+from models.gnn_model import (
+    TEPGNN,
+    TEPWindowGraphDataset,
+    build_spatiotemporal_edge_index,
+    prepare_spatiotemporal_node_features,
+)
 from models.simplemlp import SimpleMLP
+
+try:
+    from torch_geometric.loader import DataLoader as PyGDataLoader
+except ModuleNotFoundError:
+    PyGDataLoader = None
 
 
 
@@ -16,7 +27,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--model",
-        choices=["mlp", "cnn"],
+        choices=["mlp", "cnn", "gnn"],
         default="mlp",
         help="Which saved model to evaluate."
     )
@@ -28,10 +39,13 @@ def main():
     processed_data_directory = os.path.join(data_directory, "processed")
 
     cnn_checkpoint_path = os.path.join(parent_directory, "cnn1d_baseline.pt")
+    gnn_checkpoint_path = os.path.join(parent_directory, "gnn_model.pt")
     mlp_checkpoint_path = os.path.join(parent_directory, "baseline_mlp.pt")
 
     if args.model == "cnn":
         model_file_path = cnn_checkpoint_path
+    elif args.model == "gnn":
+        model_file_path = gnn_checkpoint_path
     else:
         model_file_path = mlp_checkpoint_path
 
@@ -60,10 +74,6 @@ def main():
         "model_state_dict",
         "num_classes",
         "class_labels",
-        "normalization_mean",
-        "normalization_std",
-        "validation_runs",
-        "data_file_name",
     ]
     missing_keys = [key for key in required_checkpoint_keys if key not in checkpoint]
     if len(missing_keys) > 0:
@@ -74,26 +84,39 @@ def main():
     
 
     num_classes = int(checkpoint["num_classes"])
-    model_type = None
+    model_type = checkpoint.get("model_type", None)
 
-    if "input_dim" in checkpoint:
+    if model_type is None and "input_dim" in checkpoint:
         model_type = "mlp"
+    elif model_type is None and "num_channels" in checkpoint and "sequence_length" in checkpoint:
+        model_type = "cnn"
+    elif model_type is None and "hidden_dim" in checkpoint:
+        model_type = "gnn"
+
+    if model_type == "mlp":
         input_dim = int(checkpoint["input_dim"])
         model = SimpleMLP(input_dim=input_dim, num_classes=num_classes)
         print("Model type: simple mlp")
         print("Model input_dim:", input_dim)
-    elif "num_channels" in checkpoint and "sequence_length" in checkpoint:
-        model_type = "cnn1d"
+    elif model_type == "cnn":
         num_channels = int(checkpoint["num_channels"])
         sequence_length = int(checkpoint["sequence_length"])
         model = SimpleCNN1D(num_channels=num_channels, num_classes=num_classes)
         print("Model type: simple cnn1d")
         print("Model num_channels:", num_channels)
         print("Model sequence_length:", sequence_length)
+    elif model_type == "gnn":
+        hidden_dim = int(checkpoint["hidden_dim"])
+        model = TEPGNN(
+            num_classes=num_classes,
+            hidden_dim=hidden_dim
+        )
+        print("Model type: gnn")
+        print("Model hidden_dim:", hidden_dim)
     else:
         raise KeyError(
             "Checkpoint does not contain enough model shape information. "
-            "Expected either input_dim for MLP, or num_channels and sequence_length for CNN."
+            "Expected metadata for mlp, cnn, or gnn."
         )
 
     model.load_state_dict(checkpoint["model_state_dict"])
@@ -103,20 +126,40 @@ def main():
     print("Model loaded.")
     print("Model num_classes:", num_classes)
 
-    data_file_path = os.path.join(processed_data_directory, checkpoint["data_file_name"])
+    if "dataset_path" in checkpoint and os.path.exists(str(checkpoint["dataset_path"])):
+        data_file_path = str(checkpoint["dataset_path"])
+    elif "data_file_name" in checkpoint:
+        data_file_path = os.path.join(processed_data_directory, checkpoint["data_file_name"])
+    else:
+        raise KeyError("Checkpoint does not contain dataset_path or data_file_name.")
+
     if not os.path.exists(data_file_path):
         raise FileNotFoundError("Evaluation dataset file not found: " + data_file_path)
 
     data = np.load(data_file_path, allow_pickle=True)
 
-    required_data_keys = ["inputs", "answers", "run_ids"]
+    required_data_keys = ["run_ids"]
     missing_data_keys = [key for key in required_data_keys if key not in data]
     if len(missing_data_keys) > 0:
         data.close()
         raise KeyError("Dataset is missing required keys: " + str(missing_data_keys))
 
-    inputs = data["inputs"]
-    answers = data["answers"]
+    if "inputs" in data:
+        inputs = data["inputs"]
+    elif "inputs_2d" in data:
+        inputs = data["inputs_2d"]
+    else:
+        data.close()
+        raise KeyError("Dataset must contain inputs or inputs_2d.")
+
+    if "answers" in data:
+        answers = data["answers"]
+    elif "labels" in data:
+        answers = data["labels"]
+    else:
+        data.close()
+        raise KeyError("Dataset must contain answers or labels.")
+
     run_ids = data["run_ids"]
     data.close()
 
@@ -125,6 +168,13 @@ def main():
     print("answers shape:", answers.shape)
     print("run_ids shape:", run_ids.shape)
 
+    if "validation_runs" in checkpoint:
+        validation_runs_tensor = checkpoint["validation_runs"]
+    elif "val_run_ids" in checkpoint:
+        validation_runs_tensor = checkpoint["val_run_ids"]
+    else:
+        raise KeyError("Checkpoint does not contain validation_runs or val_run_ids.")
+
     split_mode = "validation_runs"
 
     if split_mode == "full":
@@ -132,7 +182,7 @@ def main():
         answers_selected = answers
         run_ids_selected = run_ids
     elif split_mode == "validation_runs":
-        validation_runs = checkpoint["validation_runs"].detach().cpu().numpy()
+        validation_runs = validation_runs_tensor.detach().cpu().numpy()
         keep_mask = np.isin(run_ids, validation_runs)
 
         inputs_selected = inputs[keep_mask]
@@ -145,8 +195,19 @@ def main():
     print("Selected examples:", len(answers_selected))
     print("Selected run ID range:", int(np.min(run_ids_selected)), "to", int(np.max(run_ids_selected)))
 
-    normalization_mean = checkpoint["normalization_mean"].detach().cpu().numpy()
-    normalization_std = checkpoint["normalization_std"].detach().cpu().numpy()
+    if "normalization_mean" in checkpoint:
+        normalization_mean = checkpoint["normalization_mean"].detach().cpu().numpy()
+    elif "train_mean" in checkpoint:
+        normalization_mean = checkpoint["train_mean"].detach().cpu().numpy()
+    else:
+        raise KeyError("Checkpoint does not contain normalization_mean or train_mean.")
+
+    if "normalization_std" in checkpoint:
+        normalization_std = checkpoint["normalization_std"].detach().cpu().numpy()
+    elif "train_std" in checkpoint:
+        normalization_std = checkpoint["train_std"].detach().cpu().numpy()
+    else:
+        raise KeyError("Checkpoint does not contain normalization_std or train_std.")
 
     if model_type == "mlp":
         if normalization_mean.shape[0] != inputs_selected.shape[1]:
@@ -159,7 +220,7 @@ def main():
                 "normalization_std length does not match input dimension. "
                 f"std length={normalization_std.shape[0]}, input_dim={inputs_selected.shape[1]}"
             )
-    elif model_type == "cnn1d":
+    elif model_type == "cnn":
         if inputs_selected.ndim != 3:
             raise ValueError(f"CNN expects 3D inputs (N, window_size, num_sensors), got {inputs_selected.shape}")
         if normalization_mean.shape[0] != inputs_selected.shape[2]:
@@ -172,10 +233,23 @@ def main():
                 "normalization_std length does not match number of sensor channels. "
                 f"std length={normalization_std.shape[0]}, num_sensors={inputs_selected.shape[2]}"
             )
+    elif model_type == "gnn":
+        if inputs_selected.ndim != 3:
+            raise ValueError(f"GNN expects 3D inputs (N, window_size, num_sensors), got {inputs_selected.shape}")
+        if normalization_mean.shape[0] != inputs_selected.shape[2]:
+            raise ValueError(
+                "train_mean length does not match number of sensor channels. "
+                f"mean length={normalization_mean.shape[0]}, num_sensors={inputs_selected.shape[2]}"
+            )
+        if normalization_std.shape[0] != inputs_selected.shape[2]:
+            raise ValueError(
+                "train_std length does not match number of sensor channels. "
+                f"std length={normalization_std.shape[0]}, num_sensors={inputs_selected.shape[2]}"
+            )
 
     inputs_norm = (inputs_selected - normalization_mean) / normalization_std
 
-    if model_type == "cnn1d":
+    if model_type == "cnn":
         inputs_norm = np.transpose(inputs_norm, (0, 2, 1))
 
     print("Normalization applied using checkpoint stats.")
@@ -183,15 +257,42 @@ def main():
 
     batch_size = 64
 
-    inputs_tensor = torch.tensor(inputs_norm, dtype=torch.float32)
-    answers_tensor = torch.tensor(answers_selected, dtype=torch.long)
+    if model_type == "gnn":
+        if PyGDataLoader is None:
+            raise ImportError(
+                "torch_geometric is required to build graph batches for GNN evaluation."
+            )
 
-    evaluation_dataset = TensorDataset(inputs_tensor, answers_tensor)
-    evaluation_loader = DataLoader(
-        evaluation_dataset,
-        batch_size=batch_size,
-        shuffle=False
-    )
+        window_size = int(checkpoint.get("window_size", inputs_norm.shape[1]))
+        num_sensors = int(checkpoint.get("num_sensors", inputs_norm.shape[2]))
+
+        inputs_graph_tensor = prepare_spatiotemporal_node_features(inputs_norm)
+        answers_graph_tensor = torch.tensor(answers_selected, dtype=torch.long)
+
+        edge_index = build_spatiotemporal_edge_index(
+            window_size=window_size,
+            num_sensors=num_sensors
+        )
+        evaluation_dataset = TEPWindowGraphDataset(
+            graph_node_features=inputs_graph_tensor,
+            labels=answers_graph_tensor,
+            edge_index=edge_index
+        )
+        evaluation_loader = PyGDataLoader(
+            evaluation_dataset,
+            batch_size=batch_size,
+            shuffle=False
+        )
+    else:
+        inputs_tensor = torch.tensor(inputs_norm, dtype=torch.float32)
+        answers_tensor = torch.tensor(answers_selected, dtype=torch.long)
+
+        evaluation_dataset = TensorDataset(inputs_tensor, answers_tensor)
+        evaluation_loader = DataLoader(
+            evaluation_dataset,
+            batch_size=batch_size,
+            shuffle=False
+        )
 
     print("Evaluation batch size:", batch_size)
     print("Evaluation batches:", len(evaluation_loader))
@@ -200,14 +301,23 @@ def main():
     all_true_labels = []
 
     with torch.no_grad():
-        for batch_inputs, batch_answers in evaluation_loader:
-            batch_inputs = batch_inputs.to(device)
-            batch_answers = batch_answers.to(device)
+        if model_type == "gnn":
+            for batch_data in evaluation_loader:
+                batch_data = batch_data.to(device)
 
-            batch_logits = model(batch_inputs)
+                batch_logits = model(batch_data)
 
-            all_logits.append(batch_logits.cpu())
-            all_true_labels.append(batch_answers.cpu())
+                all_logits.append(batch_logits.cpu())
+                all_true_labels.append(batch_data.y.cpu())
+        else:
+            for batch_inputs, batch_answers in evaluation_loader:
+                batch_inputs = batch_inputs.to(device)
+                batch_answers = batch_answers.to(device)
+
+                batch_logits = model(batch_inputs)
+
+                all_logits.append(batch_logits.cpu())
+                all_true_labels.append(batch_answers.cpu())
 
     if len(all_logits) == 0:
         raise ValueError("No batches found in evaluation loader.")
