@@ -9,7 +9,7 @@ from models.cnn1d import SimpleCNN1D
 import torch.nn as nn
 
 
-DATA_FILE_NAME = "small_fault0_20_runs1_500_W60_step10_2d.npz"
+DATA_FILE_NAME = "small_fault0_20_runs1_20_W60_step10_2d.npz"
 
 
 def absolute_path_of_npz_data():
@@ -59,6 +59,29 @@ def split_by_runs(inputs, answers, run_ids, validation_runs):
     validation_set = [inputs_validation_np, answers_validation_np]
 
     return training_set, validation_set
+
+
+def choose_validation_runs(run_ids):
+    unique_run_ids = sorted(np.unique(run_ids).astype(int).tolist())
+
+    # Use the original large-dataset validation split when those runs exist.
+    preferred_validation_runs = list(range(376, 501))
+    available_preferred_runs = []
+
+    index = 0
+    while index < len(preferred_validation_runs):
+        run_id = preferred_validation_runs[index]
+        if run_id in unique_run_ids:
+            available_preferred_runs.append(run_id)
+        index += 1
+
+    if len(available_preferred_runs) > 0:
+        return available_preferred_runs
+
+    # For smaller datasets, use the last 25% of available runs.
+    fallback_count = max(1, len(unique_run_ids) // 4)
+    fallback_validation_runs = unique_run_ids[-fallback_count:]
+    return fallback_validation_runs
 
 
 def normalize_train_and_val(training_inputs, validation_inputs):
@@ -193,7 +216,9 @@ def main():
     print("answers shape:", answers.shape)
     print("run_ids shape:", run_ids.shape)
 
-    validation_runs = list(range(376, 501))
+    validation_runs = choose_validation_runs(run_ids)
+    print("validation runs:", validation_runs)
+
     training_set, validation_set = split_by_runs(inputs, answers, run_ids, validation_runs)
 
     inputs_training_np = training_set[0]
@@ -203,6 +228,11 @@ def main():
 
     print("training set shape --- inputs:", inputs_training_np.shape, "answers:", answers_training_np.shape)
     print("validation set shape --- inputs:", inputs_validation_np.shape, "answers:", answers_validation_np.shape)
+
+    if len(inputs_training_np) == 0:
+        raise ValueError("Training split is empty.")
+    if len(inputs_validation_np) == 0:
+        raise ValueError("Validation split is empty. Check the validation run selection.")
 
     # normalize using TRAIN only
     inputs_training_np, inputs_validation_np, normalization_mean, normalization_std = normalize_train_and_val(
