@@ -5,6 +5,7 @@
 import os
 from pathlib import Path
 import time
+import argparse
 import numpy as np
 import pandas as pd
 
@@ -204,10 +205,27 @@ def make_windows(run_df, faultNum, runNum, window_size, step_size, fault_start_s
 
     return windows, faults
 
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--fault-start", type=int, default=0, help="First fault number to include.")
+    parser.add_argument("--fault-end", type=int, default=20, help="Last fault number to include.")
+    parser.add_argument("--run-start", type=int, default=1, help="First simulation run to include.")
+    parser.add_argument("--run-end", type=int, default=500, help="Last simulation run to include.")
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
+
+    if args.fault_start > args.fault_end:
+        raise ValueError("fault-start must be less than or equal to fault-end.")
+    if args.run_start > args.run_end:
+        raise ValueError("run-start must be less than or equal to run-end.")
+
     # data used will be from small set of specific faultNumbers and simulationRuns
-    faults_to_use = list(range(0, 21)) #0..5, out of total 0-20 faults
-    runs_to_use = list(range(1, 501)) # 1..20, total there are 500 runs per fault in training
+    faults_to_use = list(range(args.fault_start, args.fault_end + 1))
+    runs_to_use = list(range(args.run_start, args.run_end + 1))
 
     # Window settings
     window_size = 60
