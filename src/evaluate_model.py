@@ -106,6 +106,14 @@ def main():
         print("Model num_channels:", num_channels)
         print("Model sequence_length:", sequence_length)
     elif model_type == "gnn":
+        if "hidden_dim" not in checkpoint:
+            raise RuntimeError(
+                "The saved gnn_model.pt does not match the current GraphSAGE GNN code.\n"
+                "Your current code expects a checkpoint with 'hidden_dim', but this checkpoint "
+                "came from a different GNN architecture experiment.\n"
+                "To evaluate the current GNN code, retrain it with:\n"
+                "python src/train_gnn.py"
+            )
         hidden_dim = int(checkpoint["hidden_dim"])
         model = TEPGNN(
             num_classes=num_classes,

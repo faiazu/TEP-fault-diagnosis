@@ -343,7 +343,7 @@ def main():
 
     start_time = time.time()
 
-    epochs = 10
+    epochs = 3
     epoch = 1
 
     while epoch <= epochs:
