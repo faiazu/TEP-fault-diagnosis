@@ -1,6 +1,6 @@
 # tep-fault-diagnosis
 
-Results found at: https://faiazu.github.io/projects/tep-results/
+Results found at: https://faiazu.github.io/projects/tep/results/
 
 This repo is me trying a few different model types on the Tennessee Eastman Process fault diagnosis dataset and seeing what actually works.
 
